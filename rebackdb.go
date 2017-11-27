@@ -1,11 +1,13 @@
 package rebackdb
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
-	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -18,51 +20,113 @@ const (
 	FormatISO dateFormat = "2006-01-02-15-04"
 )
 
+type _os string
+
+const (
+	// Unix is for MAC and Linux
+	Unix _os = "mv"
+	// Windows is for Microsoft Windows
+	Windows _os = "move"
+)
+
 // DumpOptions is options for rethink-dump command app.
 type DumpOptions struct {
 	Connection        string
-	OutputFile        string
+	OutputFileName    string
 	DatabasesToExport []string
 	TablesToExport    []string
-	Password          string
 	PasswordFile      string
 	TLSCert           string
 	Clients           int
 	TempDir           string
+	DateFormat        dateFormat
+	OperativeSystem   _os
 }
 
 // ResultFile is the resulting tar.gz of the dumping command
 type ResultFile struct {
-	Path string
-	MIME string
+	Path            string
+	MIME            string
+	OSMoveCommand   string
+	CommandExecuted string
+	CommandOutput   string
 }
 
 // Backup fires the dump command with respective options and creates a tar.gz file from
 // rethinkDB cluster
-func Backup(options DumpOptions, dateFormat dateFormat) (*ResultFile, error) {
-	cmdOptions, err := options.Validate()
-	result := &ResultFile{MIME: "application/x-tar"}
-	result.Path = fmt.Sprintf(`%s_backup_%s.tar.gz`, time.Now().Format(string(dateFormat)), options.OutputFile)
-
-	out, err := exec.Command("rethinkdb", cmdOptions...).Output()
+func Backup(options DumpOptions) (*ResultFile, error) {
+	binary, err := exec.LookPath("rethinkdb")
 	if err != nil {
 		return nil, err
 	}
 
-	log.Printf("Backup result: %s", out)
+	cmdOptions, err := options.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	result := &ResultFile{MIME: "application/x-tar"}
+	result.Path = fmt.Sprintf(`%s_backup_%s.tar.gz`, time.Now().Format(string(options.DateFormat)), options.OutputFileName)
+	result.OSMoveCommand = string(options.OperativeSystem)
+
+	cmd := exec.Command(binary, cmdOptions...)
+	env := os.Environ()
+	cmd.Env = env
+
+	var outbuf, errbuf bytes.Buffer
+	cmd.Stdout = &outbuf
+	cmd.Stderr = &errbuf
+
+	err = cmd.Start()
+	if err != nil {
+		result.CommandOutput = errbuf.String()
+		return result, err
+	}
+
+	err = cmd.Wait()
+	if err != nil {
+		result.CommandOutput = errbuf.String()
+		return result, err
+	}
+
+	result.CommandExecuted = fmt.Sprintf("%s %s", binary, strings.Join(cmdOptions, " "))
+	result.CommandOutput = outbuf.String()
 
 	return result, err
 }
 
 // Move takes resulting file from backup and moves it to an specific destination path
-func (f *ResultFile) Move(folder string) error {
-	out, err := exec.Command("mv", f.Path, folder+f.FileName()).Output()
+func (f *ResultFile) Move(folder string) (*ResultFile, error) {
+	binary, err := exec.LookPath(string(f.OSMoveCommand))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	log.Printf("To result: %s", out)
-	return nil
+	cmd := exec.Command(binary, f.Path, folder+f.FileName())
+	env := os.Environ()
+	cmd.Env = env
+
+	var outbuf, errbuf bytes.Buffer
+	cmd.Stdout = &outbuf
+	cmd.Stderr = &errbuf
+
+	f.CommandExecuted = fmt.Sprintf("%s %s %s", binary, f.Path, folder+f.FileName())
+
+	err = cmd.Start()
+	if err != nil {
+		f.CommandOutput = errbuf.String()
+		return f, err
+	}
+
+	err = cmd.Wait()
+	if err != nil {
+		f.CommandOutput = errbuf.String()
+		return f, err
+	}
+
+	f.CommandOutput = outbuf.String()
+
+	return f, nil
 }
 
 // Validate verifies if the dump options struct has it's parameters correctly specified
@@ -74,14 +138,25 @@ func (options DumpOptions) Validate() ([]string, error) {
 		return nil, err
 	}
 
-	if options.OutputFile == "" {
+	if options.OutputFileName == "" {
 		err = errors.New("Output file name was not specified")
 		return nil, err
 	}
 
+	if options.DateFormat == "" {
+		err = errors.New("A date format must be specified")
+		return nil, err
+	}
+
+	if options.OperativeSystem == "" {
+		err = errors.New("An operative system must be specified")
+		return nil, err
+	}
+
 	var cmdOptions []string
+	cmdOptions = append(cmdOptions, "dump")
 	cmdOptions = append(cmdOptions, fmt.Sprintf(`-c %s`, options.Connection))
-	cmdOptions = append(cmdOptions, fmt.Sprintf(`-f %s`, options.OutputFile))
+	cmdOptions = append(cmdOptions, fmt.Sprintf(`-f %s_backup_%s.tar.gz`, time.Now().Format(string(options.DateFormat)), options.OutputFileName))
 
 	if options.TablesToExport != nil && len(options.TablesToExport) > 0 {
 		if options.DatabasesToExport != nil && len(options.DatabasesToExport) > 0 {
@@ -103,15 +178,6 @@ func (options DumpOptions) Validate() ([]string, error) {
 				}
 			}
 		}
-	}
-
-	if options.Password != "" && options.PasswordFile != "" {
-		err = errors.New("A password or a password file could be specified, but not both")
-		return nil, err
-	}
-
-	if options.Password != "" {
-		cmdOptions = append(cmdOptions, fmt.Sprintf(`-p %s`, options.Password))
 	}
 
 	if options.PasswordFile != "" {
