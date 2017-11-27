@@ -21,17 +21,20 @@ import (
 
 func main() {
     file, err := rebackdb.Backup(rebackdb.DumpOptions{
-        Connection: "localhost:28015",
-        OutputFile: "mydatabase",
-    }, rebackdb.FormatISO)
+        Connection:      "localhost:28015",
+        OutputFileName:  "mybackup",
+        PasswordFile:    "password.txt",
+        DateFormat:      rebackdb.FormatShort,
+        OperativeSystem: rebackdb.Unix,
+    })
 
     if err != nil {
-        fatal(err)
+        log.Printf("There was an error: %s\n Command Output: %s\n Command: %s", err.Error(), file.CommandOutput, file.CommandExecuted)
     }
 
-    err = file.Move("/home/user/mybackups")
+    file, err = file.Move("./mybackups/")
     if err != nil {
-        fatal(err)
+        log.Printf("There was an error: %s\n Command Output: %s\n Command: %s", err.Error(), file.CommandOutput, file.CommandExecuted)
     }
 }
 ```
